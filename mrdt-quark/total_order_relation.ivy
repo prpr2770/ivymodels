@@ -1,0 +1,37 @@
+#lang ivy1.7
+
+# HappensBeforeEqual : Is used to capture the HappensBefore relationship that's being attempted to be captured by 
+# the Graph G(V,E) in Quark paper. 
+# It DOES NOT directly try to model the graph. 
+# Therefore, every node is connected to the `root` node. 
+# The `graph.link` captures the happens before relationship, and is updated at every instance of creating a new link/edge. 
+
+################################################################################
+
+module total_order_relation(r) = {
+    axiom r(X,X)                        # Reflexivity
+    axiom r(X, Y) & r(Y, Z) -> r(X, Z)  # Transitivity
+    axiom r(X, Y) & r(Y, X) -> X = Y    # Anti-symmetry
+    axiom r(X, Y) | r(Y, X)             # Totality 		## Is this needed for Reachability? 
+}
+
+
+module total_order(carrier) = {
+    relation le(X:carrier,Y:carrier)   # less than or equal
+
+    instantiate total_order_relation(le)
+
+    individual zero:carrier
+    axiom le(zero, X)
+
+    action get_succ(x:carrier) returns (y:carrier) = {
+        assume le(x,y) & x ~= y & ((le(x, Z) & x ~= Z) -> le(y, Z));
+    }
+
+    action get_pred(y:carrier) returns (x:carrier) = {
+        require y ~= zero;
+        assume le(x,y) & x ~= y & ((le(x, Z) & x ~= Z) -> le(y, Z));
+    }
+}
+
+################################################################################

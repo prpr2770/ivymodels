@@ -1,0 +1,147 @@
+#lang ivy1.7
+
+include total_order_relation
+
+module happensBeforeEqual(t)={
+
+	individual root:t
+
+	relation link(X:t,Y:t)
+	relation vertex(X:t)
+	#instantiate total_order_relation(link)
+
+	after init{
+		vertex(X) := false;
+		link(X,Y) := false;
+		vertex(root) := true;
+		link(root, root) := true;
+	}
+
+	action connect(src:t, dest:t) = {
+
+			vertex(dest) := true;
+			vertex(src) := true;
+			link(dest, dest) := true; 				# self-edges exist. 
+			link(src, src) := true;
+			link(root, src) := true;
+			link(root, dest) := true;
+
+			link(src, dest) := true;
+
+			#call connect_upstream(src,dest);
+			#if (exists Z:t. (Z~= src & vertex(Z) & link(Z,src)) ) { link(Z,dest) := true; };
+
+			link( Z ,dest) := ~( ~link( Z ,dest) & ~( vertex(Z) & link(Z,src) & (Z~=src) ) ); 
+
+			#call connect_downstream(src,dest); 
+			#if (exists Z:t. ( (Z~= dest) & vertex(Z) & link(dest,Z)) ) { link(src,Z) := true; };
+			link(src,Z) :=  ~( ~link(src,Z) & ~( vertex(Z) & link(dest,Z) & (Z~= dest) ) );
+
+
+
+	}
+
+	action connect_upstream(src:t,dest:t)
+	action connect_downstream(src:t,dest:t)
+
+
+
+
+	# ----------------------------------------
+	# remove all links from a node
+
+	action clear(x:t) = {
+		# whenever a node exists, it means it exists only because of formation of an edge. 
+		require x ~= root;
+		require (link(x,Y)| link(Y,x) );
+	    
+	    #call clear_downstream(x);
+	    link(x,Y) := link(x,Y) & (Y = x);
+	    
+	    #call clear_upstream(x);
+	    link(Y,x) := link(Y,x) & (Y = x);
+	    
+	    link(x,x) := false;
+	    vertex(x) := false;
+	}
+
+
+	action test = {
+	  ensure vertex(X) & vertex(Y) & vertex(Z) & link(X, Y) & link(Y, Z) -> link(X, Z)
+	}
+
+
+	# ----------------------------------------
+	# COMPUTE LCA
+
+	action lca(x:t, y:t) returns (z:t) ={
+		assume ~(exists M. link(z,x) & link(z,y) -> link(z,M) & link(M,x) & link(M,y));
+
+	}
+
+
+
+	specification{
+
+
+		before connect{
+			# a node should exist a priori
+
+			require src ~= dest; 		# The two nodes/vertices are dissimilar
+			require dest ~= root; 		# The Target can NEVER be the root. 
+			
+
+			# There didn't exist any link between the two nodes previously. 
+			require ~link(src,dest) & ~link(dest,src); 
+			
+			# The TARGET should be an ISOLATED node. Not a parent of someone
+			require ~(exists X. vertex(X) & link(dest,X));
+
+			# The SRC and TARGET shouldn't have any link to the ROOT. 
+			require ~link(dest, root) & ~link(src, root);
+
+			#require (vertex(src) & vertex(dest)) | (vertex(src) & ~vertex(dest)) | (~vertex(src) & ~vertex(dest));
+			require vertex(src) 			# The SOURCE should always exist a-priori in the HB-graph.
+			# require ~vertex(dest); 		# The dest-node is always fresh! is this true? Nope.
+
+			# [ Should these constraints be imposed ?? ]
+
+			# 1. No intermediate vertex should exist that has a link to the TARGET. 
+			# Why? 
+			#require ~(exists X. link(root,X) & vertex(X) & link(X,dest));
+
+			# 2. no scenario where a link from source to a vertex exists
+			# Why? 
+			#require ~(exists X.  vertex(X) & ~vertex(src) & (link(src,X) | link(X,src)));
+		
+		}
+
+
+		invariant vertex(root) & link(root, root)
+	    invariant vertex(X) & vertex(Y) & vertex(Z) & link(X, Y) & link(Y, Z) -> link(X, Z)  	# Transitivity
+	    invariant vertex(X) & vertex(Y) & link(X, Y) & link(Y, X) -> X = Y    		# Anti-symmetry 
+	    invariant vertex(X) & link(X,root) -> X=root 					# the root has no ancestor.	    
+	    invariant vertex(X) <-> link(X,X) & link(root, X) 	# Reflexivity: every vertex, has a link to itself. 
+
+	    # created to ensure that links cannot exist with non-vertices. 
+	    invariant link(X,Y) -> vertex(X) & vertex(Y)
+
+		# every node is connected to another one. No dangling nodes exist. 
+	    # invariant (vertex(X) & X~= root ) -> exists Y. Y~=X & vertex(Y)  & link(Y,X)	
+	    # invariant link(Y,X) & (X ~= Y) <-> vertex(X) & vertex(Y) # this doesn't hold true in INIT, as there aren't more than one node. 
+	    # invariant vertex(Y) -> link(X, Y) | link(Y,Y)
+
+
+	}
+
+	
+
+}
+
+
+#type node
+#instantiate graph : happensBeforeEqual(node)
+
+#export graph.connect
+#export graph.clear
+#export graph.test

@@ -1,0 +1,167 @@
+#lang ivy1.7
+
+include total_order_relation
+
+module happensBeforeEqualRefine(t, k)={
+
+	individual root:t
+
+	relation link(R:k,X:t,Y:t)
+	relation vertex(R:k, X:t)
+
+
+	after init{
+		vertex(R,X) := false;
+		link(R,X,Y) := false;
+		vertex(R, root) := true;
+		link(R, root, root) := true;
+	}
+
+	action connect(rep:k, src:t, dest:t) = {
+
+			vertex(rep, dest) := true;
+			vertex(rep, src) := true;
+			link(rep, dest, dest) := true; 				# self-edges exist. 
+			link(rep, src, src) := true;
+			link(rep, root, src) := true;
+			link(rep, root, dest) := true;
+
+			link(rep, src, dest) := true;
+
+			#call connect_upstream(src,dest);
+			#if (exists Z:t. (Z~= src & vertex(Z) & link(Z,src)) ) { link(Z,dest) := true; };
+
+			link(rep, Z ,dest) := ~( ~link(rep, Z ,dest) & ~( vertex(rep,Z) & link(rep,Z,src) & (Z~=src) ) ); 
+
+			#call connect_downstream(src,dest); 
+			#if (exists Z:t. ( (Z~= dest) & vertex(Z) & link(dest,Z)) ) { link(src,Z) := true; };
+			link(rep,src,Z) :=  ~( ~link(rep,src,Z) & ~( vertex(rep,Z) & link(rep,dest,Z) & (Z~= dest) ) );
+
+
+
+	}
+
+	action connect_upstream(rep:k, src:t,dest:t)
+	action connect_downstream(rep:k, src:t,dest:t)
+
+
+
+
+	# ----------------------------------------
+	# remove all links from a node
+
+	action clear(rep:k, x:t) = {
+		# whenever a node exists, it means it exists only because of formation of an edge. 
+		require x ~= root;
+		require (link(rep, x,Y)| link(rep, Y,x) );
+	    
+	    #call clear_downstream(x);
+	    link(rep, x,Y) := link(rep, x,Y) & (Y = x);
+	    
+	    #call clear_upstream(x);
+	    link(rep, Y,x) := link(rep, Y,x) & (Y = x);
+	    
+	    link(rep, x,x) := false;
+	    vertex(rep, x) := false;
+	}
+
+
+	action test(rep:k) = {
+	  ensure vertex(rep, X) & vertex(rep,Y) & vertex(rep, Z) & link(rep, X, Y) & link(rep, Y, Z) -> link(rep, X, Z)
+	}
+
+
+	# ----------------------------------------
+	# COMPUTE LCA
+
+	action lca(rep:k, x:t, y:t) returns (z:t) ={
+		assume ~(exists M. link(rep, z,x) & link(rep, z,y) -> link(rep, z,M) & link(rep, M,x) & link(rep, M,y));
+
+	}
+
+
+	# ----------------------------------------
+	# SYNCHRONIZE REPLICAS
+
+	action updateTransitivity(rep:k)={
+		assume vertex(rep,X) & vertex(rep,Y) & vertex(rep,Z) & link(rep, X, Y) & link(rep, Y, Z) -> link(rep, X, Z)
+	}
+
+	action updateAntiSymmetry(rep:k)={
+		assume vertex(rep, X) & vertex(rep, Y) & link(rep, X, Y) & link(rep, Y, X) -> X = Y
+	}
+
+	action sync(src:k, dest:k)={
+		vertex(dest,X) := vertex(src, X) | vertex(dest, X);
+		link(dest, X,Y) := link(src, X, Y) | link(dest, X, Y);
+		call updateTransitivity(dest);
+		call updateAntiSymmetry(dest);
+	}
+
+
+	specification{
+
+
+		before connect{
+			# a node should exist a priori
+
+			require src ~= dest; 		# The two nodes/vertices are dissimilar
+			require dest ~= root; 		# The Target can NEVER be the root. 
+			
+
+			# There didn't exist any link between the two nodes previously. 
+			require ~link(rep, src,dest) & ~link(rep, dest,src); 
+			
+			# The TARGET should be an ISOLATED node. Not a parent of someone
+			require ~(exists X. vertex(rep, X) & link(rep, dest,X));
+
+			# The SRC and TARGET shouldn't have any link to the ROOT. 
+			require ~link(rep, dest, root) & ~link(rep, src, root);
+
+			#require (vertex(src) & vertex(dest)) | (vertex(src) & ~vertex(dest)) | (~vertex(src) & ~vertex(dest));
+			require vertex(rep, src) 			# The SOURCE should always exist a-priori in the HB-graph.
+			# require ~vertex(dest); 		# The dest-node is always fresh! is this true? Nope.
+
+			# [ Should these constraints be imposed ?? ]
+
+			# 1. No intermediate vertex should exist that has a link to the TARGET. 
+			# Why? 
+			#require ~(exists X. link(root,X) & vertex(X) & link(X,dest));
+
+			# 2. no scenario where a link from source to a vertex exists
+			# Why? 
+			#require ~(exists X.  vertex(X) & ~vertex(src) & (link(src,X) | link(X,src)));
+		
+		}
+
+
+		invariant vertex(R,root) & link(R,root, root)
+	    invariant forall R. vertex(R,X) & vertex(R,Y) & vertex(R,Z) & link(R, X, Y) & link(R, Y, Z) -> link(R, X, Z)  	# Transitivity
+	    invariant vertex(R, X) & vertex(R, Y) & link(R, X, Y) & link(R, Y, X) -> X = Y    		# Anti-symmetry 
+	    invariant vertex(R, X) & link(R, X,root) -> X=root 					# the root has no ancestor.	    
+	    invariant vertex(R, X) <-> link(R, X,X) & link(R, root, X) 	# Reflexivity: every vertex, has a link to itself. 
+
+	    # created to ensure that links cannot exist with non-vertices. 
+	    invariant link(R, X,Y) -> vertex(R, X) & vertex(R, Y)
+
+		# every node is connected to another one. No dangling nodes exist. 
+	    # invariant (vertex(X) & X~= root ) -> exists Y. Y~=X & vertex(Y)  & link(Y,X)	
+	    # invariant link(Y,X) & (X ~= Y) <-> vertex(X) & vertex(Y) # this doesn't hold true in INIT, as there aren't more than one node. 
+	    # invariant vertex(Y) -> link(X, Y) | link(Y,Y)
+
+
+	}
+
+	
+
+}
+
+
+#type node
+#type replica
+#instantiate graph : happensBeforeEqualRefine(node, replica)
+
+#export graph.connect
+#export graph.clear
+#export graph.test
+#export graph.sync

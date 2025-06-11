@@ -1,0 +1,646 @@
+#lang ivy1.7
+
+include happensBeforeEqual
+
+# a totally ordered set for indices
+type index_t
+instantiate index : total_order(index_t)
+
+
+type version
+type branch
+type commitIDs
+
+instantiate version_imp : total_order(version)
+instantiate branch_imp : total_order(branch)
+instantiate commitIDs_imp : total_order(commitIDs)
+
+
+# an uninterpreted sort for data items
+type value
+instantiate value_imp : total_order(value)
+
+
+type edgeOps = {op_fork, op_commit, op_fstfwd, op_merge, op_nil}
+
+
+individual merge_conflict_value : value
+
+
+isolate git = {
+
+	# ---------------------------------------
+	# System State
+
+	relation setCommitIDs(X:commitIDs)
+	relation setValues(X:value)
+	relation setBranches(X:branch)
+
+	relation graphVersions(X:version)
+	relation graphLinks(X:version, Y:version)
+
+	relation cMap(X:version, Y:commitIDs)
+
+	# -- relational definition of Map
+	relation nMap(X:version, Y:value)
+	relation hMap(X:branch, Y:version)
+
+
+	relation lcAncestorRel(X:branch, Y:branch, Z:version)
+
+	# custom user-defined merge-function
+	function mergeCustomFunc(X:value, Y:value, Z:value) : value
+
+
+	instantiate graph_hb : happensBeforeEqual(version)
+	
+	# Custom Relations introduced to convert into FAU-fragment. 
+	relation toBeModified(X:branch)
+
+
+	# ---------------------------------------
+	# PREDICATES to prove some liveness properties
+	 relation exists_mergeable
+	 relation quiescentState
+
+	# ---------------------------------------
+	# INITIALIZATION
+
+	after init{
+		# variables to keep track
+        version_i := version_imp.zero;
+        branch_i := branch_imp.zero;
+        commit_i := commitIDs_imp.zero;
+        value_i := value_imp.zero;
+
+		# State-Components
+		setBranches( X ) := false; 			# we initialize with empty branches as `graph_hb.root` is NOT a VERTEX
+		setValues( X ) := false;
+		setCommitIDs(X) := false;
+
+		setBranches( branch_imp.zero) := true;
+
+		graphVersions(X) := false;
+		graphVersions(graph_hb.root) := true; 	# [Or should this be? ]graphVersions(version_imp.zero) := true; 
+		graphLinks(X,Y) := false;
+
+
+		
+		# C-Map
+		cMap(X,Y) := false;
+		cMap(graph_hb.root,Y) := false;
+
+		# N-Map : 
+		nMap(X, Y) := false;
+		nMap(graph_hb.root, value_imp.zero) := true; 	
+
+
+		# H-Map
+	
+		hMap(X, Y) := false; 
+		hMap(branch_imp.zero, graph_hb.root) := true; 		
+		
+
+		# L-Map : Function and Relation based notation 
+		lcAncestorRel(X,Y,Z) := false;
+		lcAncestorRel(branch_imp.zero, branch_imp.zero, graph_hb.root) := true; 	# TODO: Should this be done later? 
+
+
+		# Custom-Merge Function ## No initialization needed!
+
+
+		# initialize it to universal
+		toBeModified(X) := true;
+
+		# properties for proving liveness
+		exists_mergeable := false;
+		quiescentState := true;
+
+	}
+
+	# ---------------------------------------
+	# ACTIONS
+
+	action updateprogress
+
+
+	action commit(n:value, b:branch)
+	action fork(b:branch)
+	action fastforward(b1:branch, b2:branch)
+	action merge(b1:branch, b2:branch)
+
+	action updateLCA(src:branch, dest:branch, op:edgeOps)
+	action calculateLCA(b1:branch, b2:branch) returns (v: version)
+	
+
+
+
+
+	# ---------------------------------------
+	# SPECIFICATION OF ACTIONS
+
+	specification{
+
+		# Keep track of the current or latest index of each of the following types
+		individual version_i : version
+		individual branch_i : branch
+		individual commit_i : commitIDs
+		individual value_i : value
+
+		# ------------------------------------
+		# Temporary variables defined and used in the action specifications. 
+
+		individual lca_curr : version 
+		individual prev_head_version_b1 : version
+		individual prev_head_version_b2 : version
+		
+		individual prev_head_version : version
+		individual prev_head_value : value
+
+		individual var_version : version
+
+
+
+		before commit{
+            require n ~= value_imp.zero;
+            require ~setValues(n);
+            require setBranches(b);
+
+			#prev_head_version := headVersionOfBranch(b);
+			if some x:version. hMap(b,x){
+				prev_head_version := x;
+			};
+
+			require graph_hb.vertex(prev_head_version);
+			require graphVersions(prev_head_version);
+
+			# Needed to prove monotonicity. 
+			require cMap(prev_head_version, X) & setCommitIDs(X);
+
+            commit_i := commitIDs_imp.get_succ(commit_i);
+            version_i := version_imp.get_succ(version_i);
+			value_i := value_imp.get_succ(value_i);
+
+
+            # --- temporary initialization
+            n := value_imp.get_succ(value_i);
+		}
+
+		after commit{
+
+			setValues(n) := true;
+
+            graphVersions(version_i) := true;
+            graphLinks(prev_head_version, version_i) := true;
+
+			call graph_hb.connect(prev_head_version, version_i);
+
+			hMap(b, X):= false;
+			hMap(b, version_i):= true;
+
+			nMap(version_i, X) := false;
+			nMap(version_i, n) := true;
+
+
+			# ---------------------------------------------------------
+			# ---------------------------------------------------------
+			# TODO NOW:: Verify formulation! 
+			#[property] (forall X. cMap(prev_head_version, X) -> cMap(version_i, X));
+
+
+			# update/acknowledge the commit within the set of Commits. 
+            setCommitIDs(commit_i) := true;
+
+			cMap(version_i, X) := false;
+			cMap(version_i, X) := cMap(prev_head_version, X);
+			cMap(version_i, commit_i) := true;
+
+			assert (cMap(prev_head_version, X) -> cMap(version_i, X) );	
+
+			#-------------------------
+			call updateprogress;	
+		}
+
+		before fork{
+
+			branch_i := branch_imp.get_succ(branch_i);
+			version_i := version_imp.get_succ(version_i);
+			value_i := value_imp.get_succ(value_i);
+
+            require setBranches(b);
+
+			if some n:value. nMap(prev_head_version, n) {
+				git.prev_head_value := n;
+			};
+
+			require setValues(git.prev_head_value);
+
+			if some x:version. hMap(b,x){
+				git.prev_head_version := x;
+			};
+
+			require graph_hb.vertex(git.prev_head_version);
+			require graphVersions(git.prev_head_version);
+
+		}
+
+		after fork{
+
+			setBranches(branch_i) := true;
+
+			graphVersions(version_i) := true;
+			graphLinks(prev_head_version, version_i) := true;
+			call graph_hb.connect(prev_head_version, version_i); # src -> dest
+
+
+		
+			# UPDATE H-MAP
+			hMap(branch_i, X):= false; 		# reset to ensure unique entry
+			hMap(branch_i, version_i):= true;
+
+			# UPDATE N-MAP
+			nMap(version_i, X) := false; 				# reset to ensure unique entry
+			nMap(version_i, prev_head_value) := true;
+
+			# ----------------------------------------------------------
+			# ----------------------------------------------------------
+			# UPDATE C-MAP :: TODO NOW :: Verify formulation!! 
+			# [property] (forall X. cMap(prev_head_version, X) = cMap(version_i, X));
+
+			cMap(version_i, X) := false;
+			cMap(version_i, X) := cMap(prev_head_version, X);
+
+			assert( forall X. cMap(version_i, X) = cMap(prev_head_version, X) );
+
+			# =================================
+			# -----------------------------
+			# UPDATE LCA
+
+
+			# -- Relational Description
+			lcAncestorRel(branch_i, Y, Z) := lcAncestorRel(b,Y,Z) & (b~=Y);
+			lcAncestorRel(Y, branch_i, Z) := lcAncestorRel(Y, b, Z) & (b~=Y);
+
+
+			lcAncestorRel(b, branch_i, git.prev_head_version) := true;
+			lcAncestorRel(branch_i, b, git.prev_head_version) := true;
+
+			#-------------------------
+			call updateprogress;	
+		}
+
+
+		before fastforward{
+			require setBranches(b1);
+			require setBranches(b2);
+
+			version_i := version_imp.get_succ(version_i);
+			value_i := value_imp.get_succ(value_i);
+
+			lca_curr := calculateLCA(b1,b2);
+
+			if some x:version. hMap(b1,x){
+				prev_head_version_b1 := x;
+			};
+			require graph_hb.vertex(prev_head_version_b1);
+			require graphVersions(prev_head_version_b1);
+
+			if some x:version. hMap(b2,x){
+				prev_head_version_b2 := x;
+			};
+			require graph_hb.vertex(prev_head_version_b2);
+			require graphVersions(prev_head_version_b2);
+
+
+			if some n:value. nMap(prev_head_version_b2, n) {
+				git.prev_head_value := n;
+			};
+			require setValues(git.prev_head_value);
+
+
+			# TODO: Verify this
+			require (forall X. cMap(lca_curr, X) = cMap(prev_head_version_b1, X)); # equality
+			require (forall X. cMap(lca_curr, X) -> cMap(prev_head_version_b2, X)); # subset
+
+
+			# -----------------------------------------
+			# LCA-CONDITION-REACHABILITY
+
+			require (forall B:branch, Y:version, Z:version. setBranches(B) &  (lcAncestorRel( b1, B, Y) & lcAncestorRel( b2, B, Z) ) -> graph_hb.link( Y, Z) | graph_hb.link( Z, Y) );
+
+		}
+
+		after fastforward{
+
+			graphVersions(version_i) := true;
+			graphLinks(prev_head_version_b1, version_i) := true;
+			graphLinks(prev_head_version_b2, version_i) := true;
+
+			call graph_hb.connect(prev_head_version_b1, version_i);
+			call graph_hb.connect(prev_head_version_b2, version_i);
+			
+
+			# UPDATE H-MAP # ( branch b2 is being connected into branch b1, with new version being added to b1. )
+			#headVersionOfBranch(b1):= version_i;
+			hMap(b1, version_i):= true ;
+
+			# --------------------------------------
+			# UPDATE N-MAP
+	
+			nMap(version_i, X) := false; 				# reset to ensure unique entry
+			nMap(version_i, git.prev_head_value) := true;
+
+			# --------------------------------------
+			# UPDATE C-MAP : TODO :: Verify this? Does this capture the meaning of the rule? 
+			# [property] ensure (forall X. cMap(prev_head_version_b2, X) -> cMap(version_i, X));
+
+			cMap(version_i, X) := false;
+			cMap(version_i, X) := cMap(prev_head_version_b2, X) ;			
+
+			assert (forall X. cMap(prev_head_version_b2, X) = cMap(version_i, X));
+			# -----------------------------
+			# =================================
+			# UPDATE LCA : 
+
+
+			# identify set of branches to be modified.
+			toBeModified(B) := true;
+			toBeModified(B) := toBeModified(B) & ~(exists Z. forall B, Y. lcAncestorRel(b1,B,Y) & lcAncestorRel(b2,B,Z) & graph_hb.link(Y,Z) & (setBranches(b1) & setBranches(b2)) );
+
+
+			lcAncestorRel(b1,B,Z) := false;
+			lcAncestorRel(B,b1,Z) := false;
+			lcAncestorRel(b1,B,Z) :=  lcAncestorRel(b1,B,Z) | (toBeModified(B) & lcAncestorRel(b2,B,Z));
+			lcAncestorRel(B,b1,Z) :=  lcAncestorRel(B,b1,Z) | (toBeModified(B) & lcAncestorRel(B,b2,Z));
+
+			# reset
+			toBeModified(B) := true;
+			# ------------------------------------------
+			if some x:version. hMap(b2,x){
+				git.prev_head_version := x;
+			};
+
+			lcAncestorRel(b2, b1, git.prev_head_version) := true;
+			lcAncestorRel(b1, b2, git.prev_head_version) := true;
+			# =================================
+			#-------------------------
+			call updateprogress;	
+
+		}
+
+
+		before merge{
+			require setBranches(b1);
+			require setBranches(b2);
+
+			version_i := version_imp.get_succ(version_i);
+			value_i := value_imp.get_succ(value_i);
+
+			# -----------------------------------------
+			# Compute the LCA
+
+			if some x:version. lcAncestorRel(b1,b2,x){
+				lca_curr  := x;
+			};
+			
+			# -----------------------------------------
+			#prev_head_version_b1 := headVersionOfBranch(b1);
+			#prev_head_version_b2 := headVersionOfBranch(b2);
+			if some x:version. hMap(b1,x){
+				prev_head_version_b1 := x;
+			};
+			if some x:version. hMap(b2,x){
+				prev_head_version_b2 := x;
+			};
+
+			require forall X. cMap(lca_curr, X) -> cMap(prev_head_version_b1, X); # subset
+			require forall X. cMap(lca_curr, X) -> cMap(prev_head_version_b2, X); # subset
+
+			# -----------------------------------------
+			# LCA-CONDITION-REACHABILITY
+
+			require (forall B:branch, Y:version, Z:version. setBranches(B) &  (lcAncestorRel( b1, B, Y) & lcAncestorRel( b2, B, Z) ) -> graph_hb.link( Y, Z) | graph_hb.link( Z, Y) );
+
+			# -----------------------------------------
+			# Evaluate MERGE-FUNCTION
+
+			if some x:value. nMap(lca_curr, x){
+
+				if some y:value. nMap(prev_head_version_b1, x){
+
+					if some z:value. nMap(prev_head_version_b2, x){
+
+						merge_conflict_value := mergeCustomFunc( x, y, z );
+						#merge_conflict_value := value_i;
+
+					};
+
+				};
+
+			};
+			
+
+
+		}
+
+
+		after merge{
+
+			graphVersions(version_i) := true;
+			graphLinks(prev_head_version_b1, version_i) := true;
+			graphLinks(prev_head_version_b2, version_i) := true;
+
+			call graph_hb.connect(prev_head_version_b1, version_i);
+			call graph_hb.connect(prev_head_version_b2, version_i);
+
+			# UPDATE H-MAP
+			hMap(b1, version_i):= true;
+
+			# UPDATE N-MAP
+			nMap(version_i, X) := false;
+			nMap(version_i, merge_conflict_value) := true;
+			
+			# -----------------------------
+			# UPDATE C-MAP
+
+			# Attempt to compute UNION
+			#require (forall X. cMap(prev_head_version_b1, X) -> cMap(version_i, X));
+			#require (forall X. cMap(prev_head_version_b2, X) -> cMap(version_i, X));
+
+
+			cMap(version_i, X) := false; 
+			cMap(version_i, X) := ( cMap(prev_head_version_b1, X) | cMap(prev_head_version_b2, X) );
+
+			# =================================			
+			# -----------------------------
+			# UPDATE LCA : 
+
+			# identify set of branches to be modified.
+			toBeModified(B) := true;
+			toBeModified(B) := toBeModified(B) & ~(exists Z. forall B, Y. lcAncestorRel(b1,B,Y) & lcAncestorRel(b2,B,Z) & graph_hb.link(Y,Z) & (setBranches(b1) & setBranches(b2)) );
+
+
+			lcAncestorRel(b1,B,Z) := false;
+			lcAncestorRel(B,b1,Z) := false;
+			lcAncestorRel(b1,B,Z) :=  lcAncestorRel(b1,B,Z) | (toBeModified(B) & lcAncestorRel(b2,B,Z));
+			lcAncestorRel(B,b1,Z) :=  lcAncestorRel(B,b1,Z) | (toBeModified(B) & lcAncestorRel(B,b2,Z));
+
+			if some x:version. hMap(b2,x){
+				git.prev_head_version := x;
+			};
+
+			lcAncestorRel(b2, b1, git.prev_head_version) := true;
+			lcAncestorRel(b1, b2, git.prev_head_version) := true;
+			# =================================
+			#-------------------------
+			call updateprogress;	
+
+		}
+
+
+
+		after updateprogress{
+
+
+			# [property: UNSTUCK STATE]
+			# There exists a pair of branches b1 and b2 such that b2 can pull from b1.
+
+			exists_mergeable := (exists A:branch, B:branch, X:commitIDs, Y:commitIDs, Z:commitIDs, M:version, N:version, P:version. (A~=B & setBranches(A) & setBranches(B)) & (hMap(A,M) & hMap(B,N) & graph_hb.vertex(M) & graph_hb.vertex(N)) & ( lcAncestorRel(A,B,P) & graph_hb.vertex(P))    ->  (M=P) | (N=P) | (graph_hb.link(P,M) & graph_hb.link(P,N) ) );
+
+			# [property: QUIESCENT STATE]
+			# All branches have same set of commits i.e Convergence has been reached. ( The branches have all terminated into TerminalState(values))
+
+			quiescentState := forall A:branch, B:branch. ( exists X:commitIDs, Y:commitIDs, M:version, N:version. (A~=B & setBranches(A) & setBranches(B)) & (hMap(A,M) & hMap(B,N) & graph_hb.vertex(M) & graph_hb.vertex(N)) & (cMap(M,X) & cMap(N,Y) & setCommitIDs(X) & setCommitIDs(Y)  )  ->  (X=Y) );
+
+		}
+
+
+
+
+
+    ################################################################################
+	#
+	# Invariants for proving safety 
+	#
+	################################################################################
+
+    invariant setBranches(branch_imp.zero)
+
+    invariant graphVersions(git.graph_hb.root)
+    invariant graphVersions(X) -> git.graph_hb.vertex(X)
+
+    invariant graphLinks(X,Y) -> graphVersions(X) & graphVersions(Y) & (X~=Y)
+    invariant graphLinks(X,Y) -> git.graph_hb.link(X,Y)
+
+    invariant forall X. graph_hb.link(graph_hb.root, X) -> graph_hb.vertex(X) & graphVersions(X)
+
+    invariant graph_hb.link(X,Y) & graph_hb.vertex(X) & (X ~=Y) -> ~graph_hb.link(Y,X)
+    invariant graphLinks(X,Y) & graphVersions(X) & (X ~=Y) -> ~graphLinks(Y,X)
+
+    invariant exists X:version. setBranches(B) -> hMap(B,X) & graph_hb.vertex(X) & graphVersions(X)
+    
+    invariant setBranches(B) & hMap(B,X) & hMap(B,Y) -> (X=Y) &(graph_hb.vertex(X) & graph_hb.vertex(Y)) & (graphVersions(X) & graphVersions(Y))
+    
+
+
+    # -----------------------------------------
+    # Handling Commits and Version Value Maps
+
+    #invariant forall Y. ~cMap(graph_hb.root,Y)
+    invariant ~cMap(graph_hb.root,Y)
+    invariant setCommitIDs(A) -> exists X. cMap(X, A) & graph_hb.vertex(X) & graphVersions(X)
+    invariant exists X. cMap(X, A) & cMap(X, B)  ->  (setCommitIDs(A) -> setCommitIDs(B))
+
+
+    invariant nMap(graph_hb.root, value_imp.zero) 
+    invariant nMap(X, A) & nMap(X, B) -> (A=B)
+
+    # ----------------------------------------
+	# Properties of the functions
+
+	#1. #TODO: Ensure that the each version-node points only to a unique
+	invariant forall X:version, M:value, N:value. nMap(X,M) & nMap(X,N) -> git.graph_hb.vertex(X) & M=N 
+
+	#2.
+	invariant ~(exists X. (X~= branch_imp.zero) & setBranches(X) &  hMap(X, graph_hb.root ) )
+
+	#3.
+	invariant forall X:branch, Y:branch, V:version. hMap(X, V) & hMap(Y, V) & graph_hb.vertex(V) & setBranches(X) & setBranches(Y)-> X=Y  # the headVersionOfBranch function is injective
+
+
+
+	# [Symmetry of LCAncestorRel]
+
+	# version 1. 
+	# if there exists two different branches, then it can be certain that the following holds true. 
+	
+	invariant exists Z. setBranches(X) & setBranches(Y) & (X ~= Y) -> (lcAncestorRel(X,Y,Z) & lcAncestorRel(Y,X,Z)) & graph_hb.vertex(Z) & graph_hb.link(graph_hb.root, Z) 
+
+
+	invariant exists A,B. setBranches(X) & setBranches(Y) & (X ~= Y) &  (lcAncestorRel(X,Y,A) & lcAncestorRel(Y,X,B)) & (graph_hb.vertex(A) & graph_hb.link(graph_hb.root, A) & graph_hb.vertex(B) & graph_hb.link(graph_hb.root, B)  ) -> (A=B)
+
+
+	#5. [Uniqueness of LCA]
+
+	invariant forall A:version,B:version. setBranches(X) & setBranches(Y) & (X ~= Y) & (lcAncestorRel(X,Y,A) & lcAncestorRel(X,Y,B)) -> A=B & (graph_hb.vertex(A) & graph_hb.vertex(B) & graph_hb.link(graph_hb.root, A) & graph_hb.link(graph_hb.root, B) ) & (graphVersions(A) & graphVersions(B))
+
+	
+	# Commit Sets Grow Monotonically
+	#6.
+	
+	invariant exists Y, B. cMap(Y,B) -> graph_hb.vertex(Y) & graphVersions(Y) & setCommitIDs(B)
+
+	# [property]
+	invariant graph_hb.link(X,Y) & ( graph_hb.vertex(X) & graph_hb.vertex(Y) ) & cMap(X,A) & cMap(Y,B) -> (setCommitIDs(A) -> setCommitIDs(B) )
+	
+
+	# Commit Sets Modulo LCA are disjoint
+	#7.
+	invariant forall A:branch, B:branch. exists X:commitIDs, Y:commitIDs, Z:commitIDs, M:version, N:version, P:version. (A~=B & setBranches(A) & setBranches(B)) & (hMap(A,M) & hMap(B,N) & graph_hb.vertex(M) & graph_hb.vertex(N) & lcAncestorRel(A,B,P)) & (cMap(M,X) & cMap(N,Y) & cMap(P,Z) & setCommitIDs(X) & setCommitIDs(Y) & setCommitIDs(Z)  )  -> ~( (setCommitIDs(X) & ~setCommitIDs(Z)) & (setCommitIDs(Y) & ~setCommitIDs(Z)) ) 
+
+
+	# Convergence : 
+	#8.
+
+	invariant forall A:branch, B:branch. exists X:commitIDs, M:version, N:version, Y:value, Z:value. (A~=B & setBranches(A) & setBranches(B)) & (hMap(A,M) & hMap(B,N) & graph_hb.vertex(M) & graph_hb.vertex(N)) & (cMap(M,X) & cMap(N,X) & setCommitIDs(X)  )  ->  (nMap(M, Y) & nMap(N, Z) & (Y=Z) & setValues(Y) & setValues(Z))   
+	}
+
+	# 9. [property: Progress]
+	invariant (quiescentState | exists_mergeable)
+
+
+		implement calculateLCA {
+
+			#prev_head_version_b1 := headVersionOfBranch(b1);
+			#prev_head_version_b2 := headVersionOfBranch(b2);
+
+			if some x:version. hMap(b1,x){
+				prev_head_version_b1 := x;
+			};
+
+			if some x:version. hMap(b2,x){
+				prev_head_version_b2 := x;
+			};
+
+
+			v := graph_hb.lca( prev_head_version_b1, prev_head_version_b2);
+
+			lcAncestorRel(b1, b2, X) := false;
+			lcAncestorRel(b2, b1, X) := false;
+
+			lcAncestorRel(b1, b2, v) := true;
+			lcAncestorRel(b2, b1, v) := true;
+
+		}
+
+}
+
+
+export  git.commit
+export  git.fork
+export  git.fastforward
+export  git.merge
+
+export git.updateprogress
+
+export git.calculateLCA

@@ -1,0 +1,956 @@
+#lang ivy1.7
+
+include happensBeforeEqualRefine
+
+# a totally ordered set for indices
+type index_t
+instantiate index : total_order(index_t)
+
+
+type version
+type branch
+type commitIDs
+type replicaID
+
+instantiate version_imp : total_order(version)
+instantiate branch_imp : total_order(branch)
+instantiate commitIDs_imp : total_order(commitIDs)
+instantiate replicaID_imp : total_order(replicaID)
+
+# an uninterpreted sort for data items
+type value
+instantiate value_imp : total_order(value)
+
+
+type edgeOps = {op_fork, op_commit, op_fstfwd, op_merge, op_nil}
+
+
+individual merge_conflict_value : value
+
+
+
+
+isolate git = {
+
+	# ---------------------------------------
+	# System State
+
+	relation setCommitIDs( X:commitIDs)
+	relation setValues( X:value)
+	relation setBranches( X:branch)
+	relation setReplicas(X:replicaID)
+	relation setVersions(X:version)
+
+
+	# custom user-defined merge-function 	# NO INITIALIZATION NEEDED
+	function customMerge(X:value, Y:value, Z:value) : value
+
+	# -- relational definition of Map
+	relation versionValueMapRel(X:version, Y:value) 		# N-Map
+	relation commitsInVersion( X:version, Y:commitIDs) 	# C-Map
+
+	# ----- relations that rely on `replicaID`
+	# -- reliations that depend on the replica
+	relation headVersionOfBranchMapRel(R:replicaID, X:branch, Y:version)
+	relation lcAncestorRel(R:replicaID, X:branch, Y:branch, Z:version)
+
+	relation graphVersions(R:replicaID, X:version)
+	relation graphLinks(R:replicaID, X:version, Y:version)
+
+	instantiate graph_hb : happensBeforeEqualRefine(version, replicaID)
+
+
+	# ---------------------------------------
+	# Custom Relations introduced to convert into FAU-fragment. 
+
+	# TODO 11/4: Should this be modified for handling REPLICA-ID? 
+	relation toBeModified(X:branch)
+	relation toBeModified1(X:branch)
+	relation toBeModified2(X:branch)
+
+	# 1-1 function mapping each BranchID to corresponding replicaID
+	#function branchToReplicaMap(X:branch) : replicaID
+	relation branchToReplicaRel(X:branch,Y:replicaID) 
+
+
+	# ---------------------------------------
+	# PREDICATES to prove some liveness properties
+	 relation exists_mergeable
+	 relation quiescentState
+
+
+	# ---------------------------------------
+
+	# Keep track of the current or latest index of each of the following types
+	individual version_i : version
+	individual branch_i : branch
+	individual commit_i : commitIDs
+	individual value_i : value
+	individual replica_i : replicaID
+
+	individual r1 : replicaID
+	individual r2 : replicaID
+	individual r : replicaID
+
+	# ------------------------------------
+	# Temporary variables defined and used in the action specifications. 
+
+	individual lca_curr : version 
+	individual prev_head_version_b1 : version
+	individual prev_head_version_b2 : version
+	
+	individual prev_head_version_r1 : version
+	individual prev_head_version_r2 : version
+
+	individual prev_head_version : version
+	individual prev_head_value : value
+
+	individual var_version : version
+
+
+
+
+
+	# ---------------------------------------
+	# INITIALIZATION
+
+	after init{
+		# variables to keep track
+        version_i := version_imp.zero;
+        branch_i := branch_imp.zero;
+        commit_i := commitIDs_imp.zero;
+        value_i := value_imp.zero;
+        replica_i := replicaID_imp.zero;
+
+		# State-Components
+
+		setValues( X ) := false;
+		setCommitIDs(X) := false;
+		setBranches( X) := false; 		# we initialize with empty branches as `graph_hb.root` is NOT a VERTEX
+			# Initialize root-branch only on one-replica. 
+			setBranches(branch_imp.zero) := true;
+		setReplicas(X) := false;
+			setReplicas(replicaID_imp.zero) := true;
+		# Branch-To-Replica
+		branchToReplicaRel(X,Y) := false;
+			branchToReplicaRel(branch_imp.zero, replicaID_imp.zero) := true;
+		
+		# C-Map
+		commitsInVersion( X,Y) := false;
+			commitsInVersion(graph_hb.root,Y) := false;
+
+		# N-Map : 					
+		versionValueMapRel(X, Y) := false;
+			versionValueMapRel(graph_hb.root, value_imp.zero) := true; 	
+
+		# --- Relations that rely on ReplicaID
+		# H-Map
+
+		headVersionOfBranchMapRel(R, X, Y) := false; 
+			headVersionOfBranchMapRel(replicaID_imp.zero, branch_imp.zero, graph_hb.root) := true; 		
+		
+
+		# L-Map : Function and Relation based notation 
+		lcAncestorRel(R, X,Y,Z) := false;
+			# TODO: Should this be done later? 
+			lcAncestorRel(replicaID_imp.zero, branch_imp.zero, branch_imp.zero, graph_hb.root) := true; 	
+
+		# VersionGraph for each replica
+		graphVersions(R, X) := false;
+			# initalize `root-version` for `replica-zero`.
+			graphVersions(replicaID_imp.zero, graph_hb.root) := true; 	
+		graphLinks(R, X,Y) := false;
+
+		setVersions(X) := false;
+		setVersions(graph_hb.root) := true;
+
+
+		# -------------------------------
+		# Custom Relations
+
+		# initialize it to universal
+		toBeModified(X) := true;
+		toBeModified1(X) := true;
+		toBeModified2(X) := true;
+
+		# properties for proving liveness
+		exists_mergeable := false;
+		quiescentState := true;
+
+
+	}
+
+	# ---------------------------------------
+	# ACTIONS
+
+	action updateprogress
+
+
+
+	action commit( n:value, b:branch)
+	action fork( b:branch)
+	action fastforward(b1:branch, b2:branch)		# b1: dest, b2: src
+	action merge(b1:branch, b2:branch) 				# b1: dest, b2: src
+
+
+	action updateLCA(r:replicaID, src:branch, dest:branch, op:edgeOps)
+	action calculateLCA(r:replicaID, b1:branch, b2:branch) returns (v: version)
+
+	action updateBranchReplicaMap(r:replicaID, b:branch)
+
+	action computeReplicaFromBranch(b:branch) returns (r:replicaID) = {
+		assume branchToReplicaRel(b,r);
+	}
+
+	
+	
+
+	action sync(src:replicaID, dest:replicaID)={
+
+		# synchronize the Happens-Before Graph
+		call graph_hb.sync(src,dest);
+
+		# synchronize the Version_Graphs
+		graphVersions(dest,X) := graphVersions(src, X) | graphVersions(dest, X);
+		graphLinks(dest, X,Y) := graphLinks(src, X, Y) | graphLinks(dest, X, Y);
+
+		# synchronize the Branch-Head
+
+		# ORIG FORMULATION: 
+		# We are trying to ensure that the Head-Versions are updated to capture the latest/newest information contained in either of the replicas. 
+		# 1. Either the braches have same head-versions. 
+		# 2. Either the source-branch has newest head-version 
+		# 3. Or, the dest-branch has newest head-version. 
+		#headVersionOfBranchMapRel(dest,B,X) := (headVersionOfBranchMapRel(src,B,X) & headVersionOfBranchMapRel(dest,B,X) ) | (headVersionOfBranchMapRel(src,B,Y) & headVersionOfBranchMapRel(dest,B,X) & (X > Y)) | (headVersionOfBranchMapRel(src,B,X) & headVersionOfBranchMapRel(dest,B,Y) & (X > Y));
+
+
+
+		# ----	----	----	----	----	----	----	
+		# First Identify the branches which satisfy a particular condition. And then use that appropriately. 
+
+
+		# capture the Branches for which (dest-X = src-Y)		
+		toBeModified(B) := true; # reset
+		toBeModified(B) := toBeModified(B) & setBranches(B) & ~(exists X. forall B,Y. (headVersionOfBranchMapRel(src,B,Y) & headVersionOfBranchMapRel(dest,B,X) & ( (X < Y) | (X>Y) ) ) );
+
+		# ----
+		# capture the Branches for which (dest-X > src-Y)		
+		toBeModified1(B) := true; # reset
+		toBeModified1(B) := toBeModified1(B) & setBranches(B) & ~(exists X. forall B,Y. (headVersionOfBranchMapRel(src,B,Y) & headVersionOfBranchMapRel(dest,B,X) & ( (X < Y) | (X=Y) ) ) );
+
+		# ----		
+		# capture the Branches for which (src-X > dest-Y)
+		toBeModified2(B) := true; # reset
+		toBeModified2(B) := toBeModified2(B) & setBranches(B) & ~(exists X. forall B,Y. (headVersionOfBranchMapRel(src,B,X) & headVersionOfBranchMapRel(dest,B,Y) & ( (X < Y) | (X=Y) )  ) );
+
+		# ----
+		# For the appropriate condition, just use the Branch-information and the Target Tuple.
+		headVersionOfBranchMapRel(dest,B,X) := toBeModified(B) & ~toBeModified1(B) & ~toBeModified2(B) & headVersionOfBranchMapRel(dest,B,X)  | ~toBeModified(B) & toBeModified1(B) & ~toBeModified2(B)  & headVersionOfBranchMapRel(dest,B,X)  | ~toBeModified(B) & ~toBeModified1(B) & toBeModified2(B) & headVersionOfBranchMapRel(src,B,X) ;
+
+		# reset
+		toBeModified(B) := true;
+		toBeModified1(B) := true;
+		toBeModified2(B) := true;
+ 
+
+	}
+
+	action sync2(src:replicaID, dest:replicaID)={
+		# Ensure that all the localVersions in all replicas are updated into the local replica. 
+		assume (graphVersions(src,X) -> graphVersions(dest,X) );
+		assume (graphLinks(src,X,Y) -> graphLinks(dest,X,Y) );
+
+		# Ensure that the Head is latest
+		assume ( headVersionOfBranchMapRel(dest,B,X) & headVersionOfBranchMapRel(src,B,Y) & ( (X>Y) | (X=Y) ));
+
+		# Ensure that the local-happens-before-graph captures the properties also. 
+		assume (graph_hb.vertex(src,X) -> graph_hb.vertex(dest,X));
+		assume (graph_hb.link(src,X,Y) -> graph_hb.link(dest,X,Y));
+		call graph_hb.updateTransitivity(dest);
+		call graph_hb.updateAntiSymmetry(dest);
+
+	}
+
+
+
+	action synchronize(r:replicaID)={
+		# Ensure that all the localVersions in all replicas are updated into the local replica. 
+		assume (graphVersions(R,X) -> graphVersions(r,X) );
+		assume (graphLinks(R,X,Y) -> graphLinks(r,X,Y) );
+
+		# Ensure that the Head is latest
+		assume ( headVersionOfBranchMapRel(r,B,X) & headVersionOfBranchMapRel(R,B,Y) & ( (X>Y) | (X=Y) ));
+
+		# Ensure that the local-happens-before-graph captures the properties also. 
+		assume (graph_hb.vertex(R,X) -> graph_hb.vertex(r,X));
+		assume (graph_hb.link(R,X,Y) -> graph_hb.link(r,X,Y));
+		call graph_hb.updateTransitivity(r);
+		call graph_hb.updateAntiSymmetry(r);
+
+	}
+
+
+
+
+	# ---------------------------------------
+	# SPECIFICATION OF ACTIONS
+
+	specification{
+
+		before commit{
+            require n ~= value_imp.zero;
+            require ~setValues(n);
+            require setBranches(b);
+
+            #r := branchToReplicaMap(b);
+            r := computeReplicaFromBranch(b);
+            require setReplicas(r);
+
+
+			if some x:version. headVersionOfBranchMapRel(r,b,x){
+				prev_head_version := x;
+			};
+
+			require graph_hb.vertex(r,prev_head_version);
+			require graphVersions(r,prev_head_version);
+
+			# Needed to prove monotonicity. 
+			require commitsInVersion(prev_head_version, X) & setCommitIDs(X);
+
+            commit_i := commitIDs_imp.get_succ(commit_i);
+            version_i := version_imp.get_succ(version_i);
+			value_i := value_imp.get_succ(value_i);
+
+            # --- temporary initialization
+            n := value_imp.get_succ(value_i);
+
+			# Ensure that the version/value and commits are fresh create
+			require ~versionValueMapRel( version_i, X) & ~commitsInVersion(version_i, Y);
+			require ~versionValueMapRel(X,n);
+			require ~commitsInVersion(X, commit_i);
+		}
+
+		after commit{
+
+			setValues(n) := true;
+
+			setVersions(version_i) := true;
+            graphVersions(r, version_i) := true;
+            graphLinks(r, prev_head_version, version_i) := true;
+
+			call graph_hb.connect(r, prev_head_version, version_i);
+
+			#headVersionOfBranch(b):= version_i;
+			headVersionOfBranchMapRel(r, b, X):= false;
+			headVersionOfBranchMapRel(r, b, version_i):= true;
+
+			#versionValueMap(version_i) := n;
+			versionValueMapRel( version_i, X) := false;
+			versionValueMapRel( version_i, n) := true;
+
+
+			# ---------------------------------------------------------
+			# ---------------------------------------------------------
+			# TODO NOW:: Verify formulation! 
+			#[property] (forall X. commitsInVersion(prev_head_version, X) -> commitsInVersion(version_i, X));
+
+
+			# update/acknowledge the commit within the set of Commits. 
+            setCommitIDs(commit_i) := true;
+
+			# ---- Attempt 1
+			#commitsInVersion(version_i, X) := true;
+			#commitsInVersion(version_i, X) := commitsInVersion(version_i, X) & ~commitsInVersion(prev_head_version, X);
+			#commitsInVersion(version_i, commit_i) := true;
+			
+			# --- Attempt 2
+			commitsInVersion(version_i, X) := false;
+			commitsInVersion(version_i, X) := commitsInVersion(prev_head_version, X);
+			commitsInVersion(version_i, commit_i) := true;
+
+			assert (commitsInVersion(prev_head_version, X) -> commitsInVersion(version_i, X) );
+
+
+			#call updateprogress;
+		}
+
+		before fork{
+
+			#r := branchToReplicaMap(b);
+			r := computeReplicaFromBranch(b);
+
+            require setBranches(b);
+            require setReplicas(r);
+            require branchToReplicaRel(b,r);
+
+			if some x:version. headVersionOfBranchMapRel(r, b,x){
+				git.prev_head_version := x;
+			};
+			require setVersions(git.prev_head_version);
+			require graph_hb.vertex(r, git.prev_head_version);
+			require graphVersions(r, git.prev_head_version);
+
+
+			if some n:value. versionValueMapRel(prev_head_version, n) {
+				git.prev_head_value := n;
+			};
+			require setValues(git.prev_head_value);
+
+
+			# --------------
+			# Create new branch and new replica
+
+			branch_i := branch_imp.get_succ(branch_i);
+			replica_i := replicaID_imp.get_succ(replica_i);
+			require (~ setReplicas(replica_i) & ~(setBranches(branch_i)) ); 	# ensure fresh values.
+
+			version_i := version_imp.get_succ(version_i);
+				# A new value IS NOT created during FORK. 
+				#value_i := value_imp.get_succ(value_i);
+				#require ~versionValueMapRel(X,value_i);
+
+			# Ensure fresh version is created which doesn't have any prior commits or values assoicated with it. 
+			require ~commitsInVersion(version_i, X) & ~versionValueMapRel(version_i, Y);
+
+			require ~headVersionOfBranchMapRel(X, Y, version_i);
+			require ~headVersionOfBranchMapRel(replica_i, branch_i, X);
+
+			require ~graphVersions(replica_i, X);
+			require ~graph_hb.vertex(replica_i, X);
+
+		}
+
+		after fork{
+
+			setBranches(branch_i) := true;
+			setReplicas(replica_i) := true;
+
+			call updateBranchReplicaMap(replica_i, branch_i);
+
+			#--------- FORK/COPY the Graph-Structures: Copy the old ones into the new one. 
+			graphVersions(replica_i,X) := graphVersions(r,X);
+			graphLinks(replica_i, X, Y) := graphLinks(r, X, Y);
+			call graph_hb.sync(r, replica_i);
+
+			# ----------
+			# UPDATE the new replica-branches with NEW VERSION. 
+
+			setVersions(version_i) := true;
+			graphVersions(replica_i, version_i) := true;
+			graphLinks(replica_i, prev_head_version, version_i) := true;
+			call graph_hb.connect(replica_i, prev_head_version, version_i); # src -> dest
+		
+			# UPDATE N-MAP
+			#versionValueMap(version_i) := prev_head_value;
+			versionValueMapRel(version_i, X) := false; 				# reset to ensure unique entry
+			versionValueMapRel(version_i, prev_head_value) := true;
+
+			# ----------------------------------------------------------
+			# ----------------------------------------------------------
+			# UPDATE C-MAP :: TODO NOW :: Verify formulation!! 
+			# [property] (forall X. commitsInVersion(prev_head_version, X) = commitsInVersion(version_i, X));
+
+			commitsInVersion(version_i, X) := false;
+			commitsInVersion(version_i, X) := commitsInVersion(prev_head_version, X);
+
+			assert( forall X. commitsInVersion(version_i, X) = commitsInVersion(prev_head_version, X) );
+
+			# =================================
+			# REPLICA - DEPENDENT maps
+
+			# -----------------------------
+			# UPDATE H-MAP
+			#headVersionOfBranch(branch_i):= version_i;
+			headVersionOfBranchMapRel(replica_i, branch_i, X):= false; 		# reset to ensure unique entry
+			headVersionOfBranchMapRel(replica_i, branch_i, version_i):= true;
+
+
+			# -----------------------------
+			# UPDATE LCA
+
+
+			# -- Relational Description
+			lcAncestorRel(replica_i, branch_i, Y, Z) := lcAncestorRel(replica_i, b,Y,Z) & (b~=Y);
+			lcAncestorRel(replica_i, Y, branch_i, Z) := lcAncestorRel(replica_i, Y, b, Z) & (b~=Y);
+
+
+			lcAncestorRel(replica_i, b, branch_i, git.prev_head_version) := true;
+			lcAncestorRel(replica_i, branch_i, b, git.prev_head_version) := true;
+
+
+			#call updateprogress;
+
+
+		}
+
+
+		before fastforward{
+			require setBranches(b1);
+			require setBranches(b2);
+
+			r1 := computeReplicaFromBranch(b1); 	#r1 := branchToReplicaMap(b1);
+			r2 := computeReplicaFromBranch(b2); 	#r2 := branchToReplicaMap(b2);
+			assert (setReplicas(r1) & setReplicas(r2));
+
+			# -----------------------------------------
+			# SYNCHRONIZATION of DESTINATION BRANCH/REPLICA with ALL PAST MERGES
+			call synchronize(r1);
+
+			# -----------------------------------------
+			# UPDATING BRANCH
+
+			version_i := version_imp.get_succ(version_i);
+			value_i := value_imp.get_succ(value_i);
+
+			lca_curr := calculateLCA(r1, b1,b2);
+
+			if some x:version. headVersionOfBranchMapRel(r1, b1,x){
+				prev_head_version_b1 := x;
+			};
+			require graph_hb.vertex(r1, prev_head_version_b1);
+			require graphVersions(r1, prev_head_version_b1);
+
+			if some x:version. headVersionOfBranchMapRel(r1, b2,x){
+				prev_head_version_b2 := x;
+			};
+			require graph_hb.vertex(r1, prev_head_version_b2);
+			require graphVersions(r1, prev_head_version_b2);
+
+
+			if some n:value. versionValueMapRel(prev_head_version_b2, n) {
+				git.prev_head_value := n;
+			};
+			require setValues(git.prev_head_value);
+
+
+			# TODO: Verify this
+			require (forall X. commitsInVersion(lca_curr, X) = commitsInVersion(prev_head_version_b1, X)); # equality
+			require (forall X. commitsInVersion(lca_curr, X) -> commitsInVersion(prev_head_version_b2, X)); # subset
+
+
+			# -----------------------------------------
+			# LCA-CONDITION-REACHABILITY
+
+			require (forall B:branch, Y:version, Z:version. setBranches(B) &  (lcAncestorRel(r1, b1, B, Y) & lcAncestorRel(r1, b2, B, Z) ) -> graph_hb.link(r1, Y, Z) | graph_hb.link(r1, Z, Y) );
+
+		}
+
+		after fastforward{
+
+			setVersions(version_i) := true;
+			graphVersions(r1, version_i) := true;
+			graphLinks(r1, prev_head_version_b1, version_i) := true;
+			graphLinks(r1, prev_head_version_b2, version_i) := true;
+
+			call graph_hb.connect(r1, prev_head_version_b1, version_i);
+			call graph_hb.connect(r1, prev_head_version_b2, version_i);
+			
+			# =================================
+			# REPLICA - AGNOSTIC maps
+
+			# --------------------------------------
+			# UPDATE N-MAP
+			# versionValueMap(version_i) := versionValueMap(prev_head_version_b2);
+			# versionValueMapRel(version_i, X) := versionValueMapRel(version_i, X) | versionValueMapRel(prev_head_version_b2,X);
+			versionValueMapRel(version_i, X) := false; 				# reset to ensure unique entry
+			versionValueMapRel(version_i, git.prev_head_value) := true;
+
+
+			# --------------------------------------
+			# UPDATE C-MAP : 
+			# [property] ensure (forall X. commitsInVersion(prev_head_version_b2, X) -> commitsInVersion(version_i, X));
+
+			commitsInVersion(version_i, X) := false;
+			commitsInVersion(version_i, X) := commitsInVersion(prev_head_version_b2, X) ;			
+
+			assert (forall X. commitsInVersion(prev_head_version_b2, X) = commitsInVersion(version_i, X));
+
+
+			# =================================
+			# REPLICA - DEPENDENT maps
+
+			# -----------------------------
+			# UPDATE H-MAP # ( branch b2 is being connected into branch b1, with new version being added to b1. )
+			headVersionOfBranchMapRel(r1, b1, version_i):= true ;
+
+			# -----------------------------
+			# UPDATE LCA : 
+
+			# identify set of branches to be modified.
+			toBeModified(B) := true;
+			toBeModified(B) := toBeModified(B) & ~(exists Z. forall B, Y. lcAncestorRel(r1, b1,B,Y) & lcAncestorRel(r1, b2,B,Z) & graph_hb.link(r1, Y,Z) & ( setBranches(b1) & setBranches(b2) & setReplicas(r1) ) ); 	
+			# Modified : Exclude the branches such that, there exists version Z in the same replica r1, where B has [Y as lca with b1] and [Z as lca with b2] and [Y happens before Z]
+
+
+			lcAncestorRel(r1, b1,B,Z) := false;
+			lcAncestorRel(r1, B,b1,Z) := false;
+			lcAncestorRel(r1, b1,B,Z) :=  lcAncestorRel(r1, b1,B,Z) | (toBeModified(B) & lcAncestorRel(r1, b2,B,Z));
+			lcAncestorRel(r1, B,b1,Z) :=  lcAncestorRel(r1, B,b1,Z) | (toBeModified(B) & lcAncestorRel( r1, B,b2,Z));
+
+			# reset
+			toBeModified(B) := true;
+			# ------------------------------------------
+			if some x:version. headVersionOfBranchMapRel(r1, b2,x){
+				git.prev_head_version := x;
+			};
+
+			lcAncestorRel(r1, b2, b1, git.prev_head_version) := true;
+			lcAncestorRel(r1, b1, b2, git.prev_head_version) := true;
+			# =================================
+			#call updateprogress;
+
+
+		}
+
+
+		before merge{
+			require setBranches(b1); 			# dest
+			require setBranches(b2); 			# src
+
+			r1 := computeReplicaFromBranch(b1); 	#r1 := branchToReplicaMap(b1);
+			r2 := computeReplicaFromBranch(b2); 	#r2 := branchToReplicaMap(b2);
+			assert (setReplicas(r1) & setReplicas(r2));
+
+			# -----------------------------------------
+			# SYNCHRONIZATION of DESTINATION BRANCH/REPLICA with ALL PAST MERGES
+			call synchronize(r1);
+
+			# -----------------------------------------
+			# UPDATING BRANCH
+
+			version_i := version_imp.get_succ(version_i);
+			value_i := value_imp.get_succ(value_i);
+
+			# -----------------------------------------
+			# Compute the LCA
+
+			if some x:version. lcAncestorRel(r1, b1,b2,x){
+				lca_curr  := x;
+			};
+			
+			# -----------------------------------------
+			#prev_head_version_b1 := headVersionOfBranch(b1);
+			#prev_head_version_b2 := headVersionOfBranch(b2);
+			if some x:version. headVersionOfBranchMapRel(r1, b1,x){
+				prev_head_version_b1 := x;
+			};
+			if some x:version. headVersionOfBranchMapRel(r1, b2,x){
+				prev_head_version_b2 := x;
+			};
+
+			require forall X. commitsInVersion(lca_curr, X) -> commitsInVersion(prev_head_version_b1, X); # subset
+			require forall X. commitsInVersion(lca_curr, X) -> commitsInVersion(prev_head_version_b2, X); # subset
+
+			# -----------------------------------------
+			# LCA-CONDITION-REACHABILITY
+
+			require (forall B:branch, Y:version, Z:version. setBranches(B) & setReplicas(r1) & (lcAncestorRel( r1, b1, B, Y) & lcAncestorRel( r1, b2, B, Z) ) -> graph_hb.link(r1,  Y, Z) | graph_hb.link(r1,  Z, Y) );
+
+			# -----------------------------------------
+			# Evaluate MERGE-FUNCTION
+
+			if some x:value. versionValueMapRel(lca_curr, x){
+
+				if some y:value. versionValueMapRel(prev_head_version_b1, x){
+
+					if some z:value. versionValueMapRel(prev_head_version_b2, x){
+
+						merge_conflict_value := customMerge( x, y, z );
+						#merge_conflict_value := value_i;
+
+					};
+
+				};
+
+			};
+			
+
+
+		}
+
+
+		after merge{
+
+			setVersions(version_i) := true;
+
+			graphVersions(r1, version_i) := true;
+			graphLinks(r1, prev_head_version_b1, version_i) := true;
+			graphLinks(r1, prev_head_version_b2, version_i) := true;
+
+			call graph_hb.connect(r1, prev_head_version_b1, version_i);
+			call graph_hb.connect(r1, prev_head_version_b2, version_i);
+
+			# =================================			
+			# REPLICA-AGNOSTIC Maps
+
+			# -----------------------------
+			# UPDATE N-MAP
+			# versionValueMap(version_i) := merge_conflict_value;
+			versionValueMapRel(version_i, X) := false;
+			versionValueMapRel(version_i, merge_conflict_value) := true;
+			
+			# -----------------------------
+			# UPDATE C-MAP
+
+			commitsInVersion(version_i, X) := false; 
+			commitsInVersion(version_i, X) := ( commitsInVersion(prev_head_version_b1, X) | commitsInVersion(prev_head_version_b2, X) );
+
+			# =================================			
+			# REPLICA-DEPENDENT Maps
+
+			# -----------------------------
+			# UPDATE H-MAP
+			#headVersionOfBranch(b1):= version_i;
+			headVersionOfBranchMapRel(r1, b1, version_i):= true;
+
+			# -----------------------------
+			# UPDATE LCA : 
+
+			# identify set of branches to be modified.
+			toBeModified(B) := true;
+			toBeModified(B) := toBeModified(B) & ~(exists Z. forall B, Y. lcAncestorRel(r1, b1,B,Y) & lcAncestorRel(r1, b2,B,Z) & graph_hb.link(r1, Y,Z) & (setBranches(b1) & setBranches(b2) & setReplicas(r1) ) );
+
+
+			lcAncestorRel(r1, b1,B,Z) := false;
+			lcAncestorRel(r1, B,b1,Z) := false;
+			lcAncestorRel(r1, b1,B,Z) :=  lcAncestorRel(r1, b1,B,Z) | (toBeModified(B) & lcAncestorRel(r1, b2,B,Z));
+			lcAncestorRel(r1, B,b1,Z) :=  lcAncestorRel(r1, B,b1,Z) | (toBeModified(B) & lcAncestorRel(r1, B,b2,Z));
+
+			if some x:version. headVersionOfBranchMapRel(r1, b2,x){
+				git.prev_head_version := x;
+			};
+
+			lcAncestorRel(r1, b2, b1, git.prev_head_version) := true;
+			lcAncestorRel(r1, b1, b2, git.prev_head_version) := true;
+			# =================================
+
+			#call updateprogress;
+
+
+		}
+
+		# after updateprogress{
+
+
+		# 	# [property: UNSTUCK STATE]
+		# 	# There exists a pair of branches b1 and b2 such that b2 can pull from b1.
+
+		# 	exists_mergeable := (exists A:branch, B:branch, X:commitIDs, Y:commitIDs, Z:commitIDs, M:version, N:version, P:version. (A~=B & setBranches(A) & setBranches(B)) & (headVersionOfBranchMapRel(A,M) & headVersionOfBranchMapRel(B,N) & graph_hb.vertex(M) & graph_hb.vertex(N)) & ( lcAncestorRel(A,B,P) & graph_hb.vertex(P))    ->  (M=P) | (N=P) | (graph_hb.link(P,M) & graph_hb.link(P,N) ) );
+
+		# 	# [property: QUIESCENT STATE]
+		# 	# All branches have same set of commits i.e Convergence has been reached. ( The branches have all terminated into TerminalState(values))
+
+		# 	quiescentState := forall A:branch, B:branch. ( exists X:commitIDs, Y:commitIDs, M:version, N:version. (A~=B & setBranches(A) & setBranches(B)) & (headVersionOfBranchMapRel(A,M) & headVersionOfBranchMapRel(B,N) & graph_hb.vertex(M) & graph_hb.vertex(N)) & (commitsInVersion(M,X) & commitsInVersion(N,Y) & setCommitIDs(X) & setCommitIDs(Y)  )  ->  (X=Y) );
+
+		# }
+
+
+
+	# ------ Handling Replicas
+
+	before updateBranchReplicaMap{
+		require setBranches(b);
+		require setReplicas(r);
+		require ~branchToReplicaRel(b,X) & ~branchToReplicaRel(Y,r) ;
+	}
+
+	after updateBranchReplicaMap{
+
+		#branchToReplicaMap(b) := r;
+
+
+		# Ensure 1-to-1 map
+		branchToReplicaRel(X,r) := false;
+		branchToReplicaRel(b,X) := false; 
+		branchToReplicaRel(b,r) := true; 
+		
+
+	}
+
+
+
+
+
+    ################################################################################
+	#
+	# Invariants for proving safety 
+	#
+	################################################################################
+
+    # -----------------------------------------
+    # Properties of Replicas and Branches
+
+    invariant setBranches(branch_imp.zero)		# The MASTER branch should always exist. 
+    # The REPLICA-ZERO need not always exist. If it dies, then there shall never be a merge onto the main branch. 
+
+    invariant branchToReplicaRel(branch_imp.zero, replicaID_imp.zero) 
+    invariant branchToReplicaRel(B,X) & branchToReplicaRel(B,Y) -> (X=Y) 
+    invariant branchToReplicaRel(X,R) & branchToReplicaRel(Y,R) -> (X=Y) 
+
+	invariant branchToReplicaRel(B,R) -> setBranches(B) & setReplicas(R)
+    
+    #invariant exists B:branch. setReplicas(R) -> setBranches(B) & branchToReplicaRel(B,R) # this is invalid, because [if a branch-exists, then there exists replicas that are mapped to the branch. ]
+    invariant exists R:replicaID. setBranches(B) -> setReplicas(R) & branchToReplicaRel(B,R)
+    #invariant setBranches(B) -> setReplicas(R) & branchToReplicaRel(B,R)
+
+    # if [branch b exists] then [that branch has a HEAD version]
+    # TODO: This is risky: SKOLEM. 
+    #invariant exists X:version. setReplicas(R) & setBranches(B) & branchToReplicaRel(B,R) -> headVersionOfBranchMapRel(R,B,X) &  graphVersions(R,X)  & setVersions(X) 
+
+    # TODO: Uncomment this part ASAP. 
+    invariant exists X:version. setReplicas(R) & setBranches(B) & branchToReplicaRel(B,R) & setReplicas(Q) & ~(Q=R) -> headVersionOfBranchMapRel(Q,B,X) &  graphVersions(Q,X)  & setVersions(X) & (branchToReplicaRel(A,Q) & setBranches(A) ) 
+
+    
+    #invariant setReplicas(R) & setBranches(B) & headVersionOfBranchMapRel(R,B,X) & headVersionOfBranchMapRel(R,B,Y) -> (X=Y)  & (graphVersions(R,X) & graphVersions(R,Y))
+    invariant headVersionOfBranchMapRel(R,B,X) & headVersionOfBranchMapRel(R,B,Y) -> (X=Y)  
+    
+    # Whenever there exists an edge in graph_hb.vertex(R,X), then it should necessarily be the case that there are corresponding responding replicas, branches, etc, which satisfy the constraints. 
+    #invariant exists B. graph_hb.vertex(R,X) -> setReplicas(R) & setVersions(X) & branchToReplicaRel(B,R) & setBranches(B) 
+    # -----------------------------------------
+    # Properties of Branches and Versions
+
+    invariant setVersions(git.graph_hb.root)
+    # invariant graphVersions(R, git.graph_hb.root) # This isn't true, as we init only for the root-replica.
+    
+
+    # Ensuring that the vertices are same in the happensBeforeGraph and otherwise. 
+    # If [Version-Graph has some feature] then [Happens-Before-Graph shall have some feature. ]
+    #invariant graphVersions(R, X) & setVersions(X) <-> git.graph_hb.vertex(R, X) # 13 errors 
+    invariant graphVersions(R, X)  -> git.graph_hb.vertex(R, X) & setVersions(X) # 12 errors
+
+    invariant graphLinks(R,X,Y) -> (X~=Y) & (graphVersions(R,X) & graphVersions(R,Y)) 
+    invariant graphLinks(R,X,Y) -> git.graph_hb.link(R,X,Y)
+
+    invariant forall R,X. graphVersions(R,X) & setReplicas(R) & setVersions(X) ->  graph_hb.link(R,graph_hb.root, X)
+
+    invariant graphLinks(R,X,Y) & graphVersions(R,X) & graphVersions(R,Y) & setReplicas(R) & (X ~=Y) -> ~graphLinks(R,Y,X)
+
+    # 
+    # Do we need a structure [branchesInReplicaRel(R,B)]
+    #invariant versionValueRel(V,X) -> graphVersions(R,V)
+
+    # ---------------------------------------------------
+    # Properties of the HappensBefore Graph
+    invariant graph_hb.link(R,X,Y) & graph_hb.vertex(R,X) & (X ~=Y) -> ~graph_hb.link(R,Y,X)
+
+
+    # -----------------------------------------
+    # Handling Commits and Version Value Maps
+
+    #invariant forall Y. ~commitsInVersion(graph_hb.root,Y)
+    invariant ~commitsInVersion(graph_hb.root,Y)
+
+    #     invariant setCommitIDs(A) -> exists X. commitsInVersion(X, A) & graph_hb.vertex(X) & graphVersions(X)
+    #invariant setCommitIDs(A) -> exists X:version, R:replicaID. commitsInVersion(X, A) & setVersions(X) & graphVersions(R,X) & setReplicas(R) 
+    #invariant setCommitIDs(A) -> exists X:version, B:branch, R:replicaID. commitsInVersion(X, A) & graphVersions(R,X) & branchToReplicaRel(B,R) & setVersions(X) & setBranches(B) & setReplicas(R)
+    invariant setCommitIDs(A) -> exists X:version, R:replicaID. commitsInVersion(X, A) & setVersions(X) & graphVersions(R,X) & setReplicas(R)
+
+    invariant exists X. commitsInVersion(X, A) & commitsInVersion(X, B)  ->  (setCommitIDs(A) -> setCommitIDs(B))
+
+
+    invariant versionValueMapRel(graph_hb.root, value_imp.zero) 
+    invariant versionValueMapRel(X, A) & versionValueMapRel(X, B) -> (A=B)
+
+    # ----------------------------------------
+	# Properties of the functions
+
+	#1. #TODO: Ensure that the each version-node points only to a unique
+	invariant forall X:version, M:value, N:value, R:replicaID. versionValueMapRel(X,M) & versionValueMapRel(X,N) & setVersions(X)-> M=N 
+
+
+	#2. failed checks 1. 
+	# what does this capture? Does NOT exist a non-zero branch, such that its head is graph_hb.root.
+	# [orig] invariant ~(exists X. (X~= branch_imp.zero) & setBranches(X) &  headVersionOfBranchMapRel(X, graph_hb.root ) )
+	# 
+	invariant forall R:replicaID. ~(exists X. (X~= branch_imp.zero) &  headVersionOfBranchMapRel(R, X, graph_hb.root ) & setBranches(X) & setReplicas(R) & branchToReplicaRel(X,R) )
+
+	#3. In a given replica, a unique version, can exist only on a unique branch. 
+	# In a given replica, the head-version of two branches are the same version, implies that the branches are equal. This is not true. As a consequnce of forking, two different branches are created in the same replica, which have the same headVersion. 
+	invariant headVersionOfBranchMapRel(R,X, V) & headVersionOfBranchMapRel(R,Y, V) & graphVersions(R,V) & setReplicas(R) & setBranches(X) & setBranches(Y)-> X=Y  # the headVersionOfBranch function is injective
+
+
+
+	# [Symmetry of LCAncestorRel]
+
+	# version 1. :: 
+	# if there exists two different branches, then it can be certain that the following holds true. 
+	invariant exists Z. setBranches(X) & setBranches(Y) & (X ~= Y) -> (lcAncestorRel(R,X,Y,Z) & lcAncestorRel(R,Y,X,Z)) & graph_hb.vertex(R,Z) & graph_hb.link(R,graph_hb.root, Z) & setReplicas(R)
+
+
+	#5. [Uniqueness of LCA]
+
+	invariant forall A:version,B:version. setBranches(X) & setBranches(Y) & (X ~= Y) & (lcAncestorRel(R,X,Y,A) & lcAncestorRel(R,X,Y,B)) & setReplicas(R)-> A=B & (graph_hb.vertex(R,A) & graph_hb.vertex(R,B) & graph_hb.link(R,graph_hb.root, A) & graph_hb.link(R,graph_hb.root, B) ) & (graphVersions(R,A) & graphVersions(R,B)) 
+
+	
+	# Commit Sets Grow Monotonically
+	#6.
+	
+	#invariant exists Y, B. commitsInVersion(Y,B) -> graph_hb.vertex(R,Y) & graphVersions(R,Y) & setReplicas(R) & setCommitIDs(B)
+
+	# [property: 2 errors]
+
+	# non-unique versions :: (10/27) TODO VERIFY NEW: Is this the way to model subset? 
+	invariant graph_hb.link(R,X,Y) & ( ~(X=Y) & graph_hb.vertex(R,X) & graph_hb.vertex(R,Y) & setReplicas(R) & setBranches(B) & branchToReplicaRel(B,R)) & commitsInVersion(X,M) & commitsInVersion(Y,N) -> (setCommitIDs(M) -> setCommitIDs(N) )
+	
+	#invariant graph_hb.link(R,X,Y) -> setReplicas(R) & graphVersions(R,X) & graphVersions(R,Y) & setVersions(X) & setVersions(Y) & ~(X=Y)
+
+	# Commit Sets Modulo LCA are disjoint
+	#7.
+	# TODO: This is risky::
+	invariant forall A:branch, B:branch. exists X:commitIDs, Y:commitIDs, Z:commitIDs, M:version, N:version, P:version, R:replicaID. (A~=B & setBranches(A) & setBranches(B)) & (headVersionOfBranchMapRel(R,A,M) & headVersionOfBranchMapRel(R,B,N) & graph_hb.vertex(R,M) & graph_hb.vertex(R,N) & lcAncestorRel(R,A,B,P)) & (commitsInVersion(M,X) & commitsInVersion(N,Y) & commitsInVersion(P,Z) & setCommitIDs(X) & setCommitIDs(Y) & setCommitIDs(Z)  )  -> ~( (setCommitIDs(X) & ~setCommitIDs(Z)) & (setCommitIDs(Y) & ~setCommitIDs(Z)) ) 
+
+		
+
+	# 8. [property: Convergence :]
+
+	# TODO: This is risky: 
+	invariant forall A:branch, B:branch. exists X:commitIDs, M:version, N:version, Y:value, Z:value, R:replicaID. (A~=B & setBranches(A) & setBranches(B)) & (headVersionOfBranchMapRel(R,A,M) & headVersionOfBranchMapRel(R,B,N) & graph_hb.vertex(R,M) & graph_hb.vertex(R,N)) & (commitsInVersion(M,X) & commitsInVersion(N,X) & setCommitIDs(X)  )  ->  (versionValueMapRel(M, Y) & versionValueMapRel(N, Z) & (Y=Z) & setValues(Y) & setValues(Z))
+
+
+
+	# 9. [property: Progress]
+	invariant (quiescentState | exists_mergeable)
+
+	}
+
+
+
+		implement calculateLCA {
+
+			#prev_head_version_b1 := headVersionOfBranch(b1);
+			#prev_head_version_b2 := headVersionOfBranch(b2);
+
+			if some x:version. headVersionOfBranchMapRel(r,b1,x){
+				prev_head_version_b1 := x;
+			};
+
+			if some x:version. headVersionOfBranchMapRel(r,b2,x){
+				prev_head_version_b2 := x;
+			};
+
+
+			v := graph_hb.lca(r, prev_head_version_b1, prev_head_version_b2);
+
+			lcAncestorRel(r, b1, b2, X) := false;
+			lcAncestorRel(r, b2, b1, X) := false;
+
+			lcAncestorRel(r, b1, b2, v) := true;
+			lcAncestorRel(r, b2, b1, v) := true;
+
+		}
+
+
+
+}
+
+
+export  git.commit
+export  git.fork
+
+export  git.fastforward
+export  git.merge
+
+export git.updateprogress
+
+export git.sync2
+export git.synchronize
